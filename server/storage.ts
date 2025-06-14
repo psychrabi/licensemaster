@@ -1,11 +1,30 @@
-import { licenses, customers, sales, type License, type InsertLicense, type Customer, type InsertCustomer, type Sale, type InsertSale, users, type User, type InsertUser } from "@shared/schema";
+import { 
+  licenses, 
+  customers, 
+  sales, 
+  users,
+  refundRequests,
+  deactivationRequests,
+  type License, 
+  type Customer, 
+  type Sale, 
+  type User,
+  type UpsertUser,
+  type RefundRequest,
+  type DeactivationRequest,
+  type InsertLicense, 
+  type InsertCustomer, 
+  type InsertSale,
+  type InsertRefundRequest,
+  type InsertDeactivationRequest
+} from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, count, sum, and, sql } from "drizzle-orm";
 
 export interface IStorage {
-  getUser(id: number): Promise<User | undefined>;
-  getUserByUsername(username: string): Promise<User | undefined>;
-  createUser(user: InsertUser): Promise<User>;
+  // User operations for Replit Auth
+  getUser(id: string): Promise<User | undefined>;
+  upsertUser(user: UpsertUser): Promise<User>;
   
   // License management
   getLicenses(): Promise<License[]>;
@@ -22,6 +41,7 @@ export interface IStorage {
   
   // Sales management
   getSales(): Promise<Sale[]>;
+  getSalesByCustomer(userId: string): Promise<(Sale & { license: License; customer: Customer })[]>;
   getRecentSales(limit?: number): Promise<(Sale & { license: License; customer: Customer })[]>;
   createSale(sale: InsertSale): Promise<Sale>;
   
@@ -31,23 +51,34 @@ export interface IStorage {
   getSoldLicenseCount(): Promise<number>;
   getNewCustomerCount(days?: number): Promise<number>;
   getRecentActivity(limit?: number): Promise<any[]>;
+  
+  // Request management
+  createRefundRequest(request: InsertRefundRequest): Promise<RefundRequest>;
+  createDeactivationRequest(request: InsertDeactivationRequest): Promise<DeactivationRequest>;
+  getRefundRequests(): Promise<RefundRequest[]>;
+  getDeactivationRequests(): Promise<DeactivationRequest[]>;
+  updateRefundRequestStatus(id: number, status: string, adminNotes?: string): Promise<void>;
+  updateDeactivationRequestStatus(id: number, status: string, adminNotes?: string): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
-  async getUser(id: number): Promise<User | undefined> {
+  // User operations for Replit Auth
+  async getUser(id: string): Promise<User | undefined> {
     const [user] = await db.select().from(users).where(eq(users.id, id));
     return user || undefined;
   }
 
-  async getUserByUsername(username: string): Promise<User | undefined> {
-    const [user] = await db.select().from(users).where(eq(users.username, username));
-    return user || undefined;
-  }
-
-  async createUser(insertUser: InsertUser): Promise<User> {
+  async upsertUser(userData: UpsertUser): Promise<User> {
     const [user] = await db
       .insert(users)
-      .values(insertUser)
+      .values(userData)
+      .onConflictDoUpdate({
+        target: users.id,
+        set: {
+          ...userData,
+          updatedAt: new Date(),
+        },
+      })
       .returning();
     return user;
   }
@@ -187,6 +218,81 @@ export class DatabaseStorage implements IStorage {
       description: `${activity.description} sold to ${activity.customerName}`,
       timestamp: activity.timestamp
     }));
+  }
+
+  async getSalesByCustomer(userId: string): Promise<(Sale & { license: License; customer: Customer })[]> {
+    return await db
+      .select({
+        id: sales.id,
+        licenseId: sales.licenseId,
+        customerId: sales.customerId,
+        amount: sales.amount,
+        status: sales.status,
+        createdAt: sales.createdAt,
+        license: licenses,
+        customer: customers,
+      })
+      .from(sales)
+      .innerJoin(licenses, eq(sales.licenseId, licenses.id))
+      .innerJoin(customers, eq(sales.customerId, customers.id))
+      .innerJoin(users, eq(customers.email, users.email))
+      .where(eq(users.id, userId))
+      .orderBy(desc(sales.createdAt));
+  }
+
+  async createRefundRequest(request: InsertRefundRequest): Promise<RefundRequest> {
+    const [created] = await db.insert(refundRequests).values(request).returning();
+    return created;
+  }
+
+  async createDeactivationRequest(request: InsertDeactivationRequest): Promise<DeactivationRequest> {
+    const [created] = await db.insert(deactivationRequests).values(request).returning();
+    return created;
+  }
+
+  async getRefundRequests(): Promise<RefundRequest[]> {
+    return await db.select().from(refundRequests).orderBy(desc(refundRequests.createdAt));
+  }
+
+  async getDeactivationRequests(): Promise<DeactivationRequest[]> {
+    return await db.select().from(deactivationRequests).orderBy(desc(deactivationRequests.createdAt));
+  }
+
+  async updateRefundRequestStatus(id: number, status: string, adminNotes?: string): Promise<void> {
+    await db
+      .update(refundRequests)
+      .set({ 
+        status, 
+        adminNotes,
+        updatedAt: new Date() 
+      })
+      .where(eq(refundRequests.id, id));
+  }
+
+  async updateDeactivationRequestStatus(id: number, status: string, adminNotes?: string): Promise<void> {
+    await db
+      .update(deactivationRequests)
+      .set({ 
+        status, 
+        adminNotes,
+        updatedAt: new Date() 
+      })
+      .where(eq(deactivationRequests.id, id));
+
+    // If approved, update the sale status
+    if (status === "approved") {
+      const [request] = await db
+        .select()
+        .from(deactivationRequests)
+        .where(eq(deactivationRequests.id, id));
+      
+      if (request) {
+        await db
+          .update(sales)
+          .set({ status: "deactivated" })
+          .where(eq(sales.id, request.saleId));
+      }
+    }
   }
 }
 

@@ -11,6 +11,7 @@ export function useCart() {
 
   return {
     cart,
+    itemCount: cart.itemCount,
     addToCart: cartManager.addToCart.bind(cartManager),
     updateQuantity: cartManager.updateQuantity.bind(cartManager),
     removeFromCart: cartManager.removeFromCart.bind(cartManager),

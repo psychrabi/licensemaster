@@ -1,13 +1,28 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
+import { setupAuth, isAuthenticated, isAdmin } from "./replitAuth";
 import { insertLicenseSchema, insertCustomerSchema, insertSaleSchema } from "@shared/schema";
 import { z } from "zod";
 
 export async function registerRoutes(app: Express): Promise<Server> {
+  // Auth middleware
+  await setupAuth(app);
+
+  // Auth routes
+  app.get('/api/auth/user', isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const user = await storage.getUser(userId);
+      res.json(user);
+    } catch (error) {
+      console.error("Error fetching user:", error);
+      res.status(500).json({ message: "Failed to fetch user" });
+    }
+  });
   
-  // License routes
-  app.get("/api/licenses", async (req, res) => {
+  // License routes (protected - admin only)
+  app.get("/api/licenses", isAdmin, async (req, res) => {
     try {
       const licenses = await storage.getLicenses();
       res.json(licenses);
@@ -40,7 +55,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.post("/api/licenses", async (req, res) => {
+  app.post("/api/licenses", isAdmin, async (req, res) => {
     try {
       const addLicenseRequestSchema = z.object({
         type: z.string(),
@@ -88,8 +103,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Customer routes
-  app.get("/api/customers", async (req, res) => {
+  // Customer routes (protected - admin only)
+  app.get("/api/customers", isAdmin, async (req, res) => {
     try {
       const customers = await storage.getCustomers();
       res.json(customers);
@@ -119,8 +134,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Sales routes
-  app.get("/api/sales", async (req, res) => {
+  // Sales routes (protected - admin only)
+  app.get("/api/sales", isAdmin, async (req, res) => {
     try {
       const sales = await storage.getSales();
       res.json(sales);
@@ -129,7 +144,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.get("/api/sales/recent", async (req, res) => {
+  app.get("/api/sales/recent", isAdmin, async (req, res) => {
     try {
       const limit = parseInt(req.query.limit as string) || 10;
       const sales = await storage.getRecentSales(limit);
@@ -184,8 +199,58 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Dashboard metrics routes
-  app.get("/api/dashboard/metrics", async (req, res) => {
+  // Customer routes for authenticated users
+  app.get("/api/customer/purchases", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const purchases = await storage.getSalesByCustomer(userId);
+      res.json(purchases);
+    } catch (error) {
+      console.error("Error fetching customer purchases:", error);
+      res.status(500).json({ message: "Failed to fetch purchases" });
+    }
+  });
+
+  app.post("/api/customer/refund-request", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { saleId, reason } = req.body;
+      
+      const request = await storage.createRefundRequest({
+        saleId,
+        customerId: userId,
+        reason,
+        status: "pending"
+      });
+      
+      res.json(request);
+    } catch (error) {
+      console.error("Error creating refund request:", error);
+      res.status(500).json({ message: "Failed to create refund request" });
+    }
+  });
+
+  app.post("/api/customer/deactivation-request", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const { saleId, reason } = req.body;
+      
+      const request = await storage.createDeactivationRequest({
+        saleId,
+        customerId: userId,
+        reason,
+        status: "pending"
+      });
+      
+      res.json(request);
+    } catch (error) {
+      console.error("Error creating deactivation request:", error);
+      res.status(500).json({ message: "Failed to create deactivation request" });
+    }
+  });
+
+  // Dashboard metrics routes (protected - admin only)
+  app.get("/api/dashboard/metrics", isAdmin, async (req, res) => {
     try {
       const [totalSales, availableLicenses, licensesSold, newCustomers] = await Promise.all([
         storage.getTotalSales(),
@@ -205,13 +270,60 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.get("/api/dashboard/activity", async (req, res) => {
+  app.get("/api/dashboard/activity", isAdmin, async (req, res) => {
     try {
       const limit = parseInt(req.query.limit as string) || 10;
       const activity = await storage.getRecentActivity(limit);
       res.json(activity);
     } catch (error) {
       res.status(500).json({ message: "Failed to fetch recent activity" });
+    }
+  });
+
+  // Admin routes for managing requests
+  app.get("/api/admin/refund-requests", isAdmin, async (req, res) => {
+    try {
+      const requests = await storage.getRefundRequests();
+      res.json(requests);
+    } catch (error) {
+      console.error("Error fetching refund requests:", error);
+      res.status(500).json({ message: "Failed to fetch refund requests" });
+    }
+  });
+
+  app.get("/api/admin/deactivation-requests", isAdmin, async (req, res) => {
+    try {
+      const requests = await storage.getDeactivationRequests();
+      res.json(requests);
+    } catch (error) {
+      console.error("Error fetching deactivation requests:", error);
+      res.status(500).json({ message: "Failed to fetch deactivation requests" });
+    }
+  });
+
+  app.patch("/api/admin/refund-requests/:id", isAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { status, adminNotes } = req.body;
+      
+      await storage.updateRefundRequestStatus(parseInt(id), status, adminNotes);
+      res.json({ message: "Refund request updated successfully" });
+    } catch (error) {
+      console.error("Error updating refund request:", error);
+      res.status(500).json({ message: "Failed to update refund request" });
+    }
+  });
+
+  app.patch("/api/admin/deactivation-requests/:id", isAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { status, adminNotes } = req.body;
+      
+      await storage.updateDeactivationRequestStatus(parseInt(id), status, adminNotes);
+      res.json({ message: "Deactivation request updated successfully" });
+    } catch (error) {
+      console.error("Error updating deactivation request:", error);
+      res.status(500).json({ message: "Failed to update deactivation request" });
     }
   });
 
